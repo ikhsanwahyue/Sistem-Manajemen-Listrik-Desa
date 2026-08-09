@@ -145,7 +145,7 @@ export default function LembarKontrolPage() {
         : wargaList.filter(item => item.rt === selectedRt);
 
     // Fungsi helper untuk menghitung total per warga dan membulatkannya ke ribuan terdekat
-    const getRoundedTotal = (item: WargaControl) => {
+    const getRoundedTotal = (item: any) => {
         const rawTotal = item.tagihanPln + item.admin;
         // Gunakan Math.round untuk pembulatan standar, atau Math.floor jika ingin selalu ke bawah
         return Math.round(rawTotal / 1000) * 1000;
