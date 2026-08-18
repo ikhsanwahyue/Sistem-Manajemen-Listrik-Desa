@@ -1,107 +1,177 @@
 import { NextResponse } from 'next/server';
-import crypto from 'crypto';
+import puppeteer from 'puppeteer';
 
 interface InquiryRequest {
     idPelanggan: string;
 }
 
 export async function POST(request: Request) {
+    let browser = null;
+
     try {
         const body: InquiryRequest = await request.json();
         const { idPelanggan } = body;
 
+        // -------------------------------------------------------------
+        // 1. VALIDASI INPUT ID PELANGGAN
+        // -------------------------------------------------------------
         if (!idPelanggan) {
             return NextResponse.json(
-                { success: false, message: 'ID Pelanggan wajib diisi' },
+                { success: false, status: 'ERROR', message: 'ID Pelanggan wajib diisi.' },
                 { status: 400 }
             );
         }
 
-        // 1. Bersihkan ID Pelanggan dari spasi/titik (cth: 521.030.321.864 -> 521030321864)
         const cleanIdPel = idPelanggan.replace(/[^0-9]/g, '');
 
-        const username = process.env.PPOB_USERNAME || '';
-        const apiKey = process.env.PPOB_API_KEY || '';
-        const env = process.env.PPOB_ENV || 'development';
-        const adminDesa = Number(process.env.NEXT_PUBLIC_ADMIN_DESA || 6000);
-
-        // Jika API Key belum diset di .env.local, gunakan Mode Simulasi cerdas
-        if (!username || !apiKey) {
-            console.log('⚠️ [SIGAP] Kredensial PPOB tidak ditemukan di .env.local. Menggunakan Mode Simulasi.');
-
-            // Hitung tagihan simulasi konsisten berbasis ID Pelanggan
-            const pseudoRandom = (parseInt(cleanIdPel.slice(-5)) * 123) % 180000 + 35000;
-            const tagihanPlnSimulasi = Math.round(pseudoRandom / 100) * 100;
-
-            return NextResponse.json({
-                success: true,
-                idPelanggan: cleanIdPel,
-                namaPelanggan: `PLN - ${cleanIdPel.slice(-4)}`,
-                periode: 'AGUSTUS 2026',
-                tagihanPln: tagihanPlnSimulasi,
-                adminDesa: adminDesa,
-                totalTagihan: tagihanPlnSimulasi + adminDesa,
-                isSimulasi: true,
-                message: 'Berhasil (Mode Simulasi)'
-            });
+        if (cleanIdPel.length < 11 || cleanIdPel.length > 12) {
+            return NextResponse.json(
+                { success: false, status: 'INVALID_ID', message: 'Format ID Pelanggan PLN harus 11-12 digit.' },
+                { status: 400 }
+            );
         }
 
-        const refId = `SIGAP-${Date.now()}-${cleanIdPel.slice(-4)}`;
+        const adminDesa = Number(process.env.NEXT_PUBLIC_ADMIN_DESA || 6000);
+        console.log(`🤖 [SIGAP Scraper] Memulai cek tagihan Sepulsa untuk ID: ${cleanIdPel}`);
 
-        const signature = crypto
-            .createHash('md5')
-            .update(username + apiKey + refId)
-            .digest('hex');
-
-        const endpoint = env === 'production'
-            ? 'https://api.iak.id/api/v1/bill/check'
-            : 'https://testpostpaid.mobilepulsa.net/api/v1/bill/check';
-
-        const payload = {
-            commands: 'inq-pasca',
-            username: username,
-            code: 'PLNPOSTPAID',
-            hp: cleanIdPel,
-            ref_id: refId,
-            sign: signature
-        };
-
-        const ppobRes = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+        // -------------------------------------------------------------
+        // 2. JALANKAN PUPPETEER
+        // -------------------------------------------------------------
+        browser = await puppeteer.launch({
+            headless: true,
+            channel: 'chrome', // Menggunakan Chrome lokal Windows
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu'
+            ]
         });
 
-        const ppobData = await ppobRes.json();
+        const page = await browser.newPage();
+        await page.setViewport({ width: 1280, height: 800 });
+        await page.setUserAgent(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        );
 
-        if (ppobData?.data?.response_code === '00') {
-            const nominalPln = Number(ppobData.data.nominal || 0);
-            const namaPel = ppobData.data.tr_name || 'PELANGGAN PLN';
-            const periode = ppobData.data.period || 'AGUSTUS 2026';
+        // Buka halaman Sepulsa PLN Postpaid
+        await page.goto('https://www.sepulsa.com/transaction/pln?type=postpaid', {
+            waitUntil: 'networkidle2',
+            timeout: 30000
+        });
 
-            return NextResponse.json({
-                success: true,
-                idPelanggan: cleanIdPel,
-                namaPelanggan: namaPel,
-                periode: periode,
-                tagihanPln: nominalPln,
-                adminDesa: adminDesa,
-                totalTagihan: nominalPln + adminDesa,
-                isSimulasi: false,
-                message: 'Tagihan PLN berhasil diambil'
-            });
-        } else {
+        // -------------------------------------------------------------
+        // 3. INPUT ID PELANGGAN & SUBMIT
+        // -------------------------------------------------------------
+        const inputSelector = 'input[type="tel"], input[type="text"], input[placeholder*="1234xxx"]';
+        await page.waitForSelector(inputSelector, { timeout: 10000 });
+
+        await page.focus(inputSelector);
+        await page.type(inputSelector, cleanIdPel, { delay: 50 });
+
+        const buttonSelector = 'button, input[type="submit"]';
+        await page.waitForSelector(buttonSelector);
+
+        await page.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const submitBtn = buttons.find(b => b.innerText.includes('Lanjutkan') && !b.disabled);
+            if (submitBtn) submitBtn.click();
+        });
+
+        // Tunggu respon AJAX
+        await new Promise(r => setTimeout(r, 3500));
+
+        // Ambil seluruh teks hasil render halaman
+        const rawText = await page.evaluate(() => document.body.innerText);
+        const lowerText = rawText.toLowerCase();
+
+        await browser.close();
+        browser = null;
+
+        // -------------------------------------------------------------
+        // 4. VALIDASI RESPONS DARI HALAMAN
+        // -------------------------------------------------------------
+
+        // A. CEK JIKA ID PELANGGAN TIDAK DITEMUKAN / SALAH
+        const isInvalidId =
+            lowerText.includes('tidak ditemukan') ||
+            lowerText.includes('id pelanggan salah') ||
+            lowerText.includes('nomor tidak valid') ||
+            lowerText.includes('periksa kembali');
+
+        if (isInvalidId) {
             return NextResponse.json({
                 success: false,
-                message: ppobData?.data?.message || 'Gagal mengambil data PLN / ID Pelanggan tidak ditemukan'
-            }, { status: 400 });
+                status: 'INVALID_ID',
+                message: `ID Pelanggan ${cleanIdPel} tidak ditemukan di sistem PLN.`
+            }, { status: 404 });
         }
 
-    } catch (error) {
-        console.error('Error PLN Inquiry API:', error);
-        return NextResponse.json(
-            { success: false, message: 'Gagal terhubung ke server PLN/PPOB' },
-            { status: 500 }
-        );
+        // B. CEK JIKA TAGIHAN SUDAH LUNAS / NIHIL
+        const isLunas =
+            lowerText.includes('lunas') ||
+            lowerText.includes('tidak ada tagihan') ||
+            lowerText.includes('sudah dibayar') ||
+            lowerText.includes('tagihan nihil');
+
+        // Extract Angka Nominal
+        const rpMatch = rawText.match(/Rp\s?([\d.,]+)/i);
+        let tagihanPln = 0;
+
+        if (rpMatch && rpMatch[1]) {
+            tagihanPln = parseInt(rpMatch[1].replace(/[^0-9]/g, ''), 10);
+        }
+
+        if (isLunas || tagihanPln === 0) {
+            return NextResponse.json({
+                success: true,
+                status: 'LUNAS',
+                idPelanggan: cleanIdPel,
+                tagihanPln: 0,
+                adminDesa: 0,
+                totalTagihan: 0,
+                message: `Tagihan PLN untuk ID ${cleanIdPel} SUDAH LUNAS / Tidak ada tunggakan.`
+            }, { status: 200 });
+        }
+
+        // C. KONDISI BELUM LUNAS (BERHASIL AMBIL TAGIHAN)
+        const namaMatch = rawText.match(/Nama\s*:\s*([^\n]+)/i) || rawText.match(/Nama Pelanggan\s*:\s*([^\n]+)/i);
+        const namaPelanggan = namaMatch ? namaMatch[1].trim() : `PLN - ${cleanIdPel.slice(-4)}`;
+
+        return NextResponse.json({
+            success: true,
+            status: 'BELUM_LUNAS',
+            idPelanggan: cleanIdPel,
+            namaPelanggan: namaPelanggan,
+            periode: 'Bulan Ini',
+            tagihanPln: tagihanPln,
+            adminDesa: adminDesa,
+            totalTagihan: tagihanPln + adminDesa,
+            message: 'Data tagihan berhasil didapatkan.'
+        }, { status: 200 });
+
+    } catch (error: any) {
+        // Tutup browser jika masih terbuka saat error
+        if (browser) await browser.close();
+
+        console.error('⚠️ [SIGAP Scraper Error]:', error.message);
+
+        // -------------------------------------------------------------
+        // 5. ERROR HANDLING (Gagal koneksi/Timeout/Kena Block)
+        // -------------------------------------------------------------
+        let errorMessage = 'Gagal melakukan pengambilan data dari server.';
+
+        if (error.message.includes('timeout')) {
+            errorMessage = 'Koneksi ke server PLN/Sepulsa mengalami timeout. Silakan coba lagi.';
+        } else if (error.message.includes('Navigation failed')) {
+            errorMessage = 'Tidak dapat terhubung ke situs pembanding tagihan.';
+        }
+
+        return NextResponse.json({
+            success: false,
+            status: 'ERROR',
+            message: errorMessage,
+            errorDetail: error.message
+        }, { status: 500 });
     }
 }

@@ -3,9 +3,10 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabase';
 
 interface WargaData {
-    id: number;
+    id: number | string;
     nama: string;
     rt: string;
     idPelanggan: string;
@@ -114,6 +115,7 @@ export default function KasirPage() {
     const [wargaList, setWargaList] = useState<WargaData[]>(initialData);
     const [selectedRt, setSelectedRt] = useState<string>('SEMUA');
     const [searchQuery, setSearchQuery] = useState<string>('');
+    const [isSyncingSupabase, setIsSyncingSupabase] = useState<boolean>(false);
 
     // 1. Proteksi Halaman (Autentikasi User)
     useEffect(() => {
@@ -123,48 +125,104 @@ export default function KasirPage() {
         }
     }, [router]);
 
-    // 2. Ambil data dari LocalStorage
-    useEffect(() => {
-        const savedData = localStorage.getItem('sigap_warga_balong_data');
-        if (savedData) {
-            try {
-                const parsed = JSON.parse(savedData);
-                // Jika data di localStorage sudah ada dan jumlahnya sesuai, gunakan itu
-                // sehingga nominal tagihan PLN yang sudah diinput dari menu lain tetap ada
-                if (parsed && parsed.length > 0) {
-                    setWargaList(parsed);
-                } else {
-                    setWargaList(initialData);
+    // 2. Ambil data dari Supabase (dengan fallback ke LocalStorage/initialData)
+    const fetchWargaData = async () => {
+        setIsSyncingSupabase(true);
+        try {
+            const { data, error } = await supabase
+                .from('pelanggan')
+                .select('*')
+                .order('nama', { ascending: true });
+
+            if (!error && data && data.length > 0) {
+                const mapped: WargaData[] = data.map((item: any, idx: number) => ({
+                    id: item.id || idx + 1,
+                    nama: item.nama || '',
+                    rt: item.rt || 'RT 04',
+                    idPelanggan: item.id_pelanggan || '',
+                    tagihanPln: Number(item.tagihan_pln) || 0,
+                    admin: Number(item.admin) || 6000,
+                    isLunas: Boolean(item.is_lunas),
+                }));
+                setWargaList(mapped);
+                localStorage.setItem('sigap_warga_balong_data', JSON.stringify(mapped));
+            } else {
+                // Fallback ke localStorage
+                const savedData = localStorage.getItem('sigap_warga_balong_data');
+                if (savedData) {
+                    try {
+                        const parsed = JSON.parse(savedData);
+                        if (parsed && parsed.length > 0) setWargaList(parsed);
+                    } catch (e) {
+                        setWargaList(initialData);
+                    }
                 }
-            } catch (e) {
-                setWargaList(initialData);
             }
-        } else {
-            // Jika belum ada sama sekali, inisialisasi dengan data awal
-            localStorage.setItem('sigap_warga_balong_data', JSON.stringify(initialData));
+        } catch (err) {
+            console.error('Error fetching Supabase in kasir:', err);
+        } finally {
+            setIsSyncingSupabase(false);
         }
+    };
+
+    useEffect(() => {
+        fetchWargaData();
     }, []);
 
-    // Helper untuk menyimpan perubahan ke State & LocalStorage
-    const updateAndSaveData = (newList: WargaData[]) => {
+    // Helper untuk menyimpan perubahan ke State, LocalStorage & Supabase
+    const updateAndSaveData = async (newList: WargaData[]) => {
         setWargaList(newList);
         localStorage.setItem('sigap_warga_balong_data', JSON.stringify(newList));
     };
 
     // Handle Perubahan Tagihan PLN per Warga
-    const handleTagihanChange = (id: number, val: number) => {
+    const handleTagihanChange = async (idPelanggan: string, val: number) => {
         const updated = wargaList.map(item =>
-            item.id === id ? { ...item, tagihanPln: val } : item
+            item.idPelanggan === idPelanggan ? { ...item, tagihanPln: val } : item
         );
         updateAndSaveData(updated);
+
+        // Update ke Supabase
+        await supabase
+            .from('pelanggan')
+            .update({ tagihan_pln: val })
+            .eq('id_pelanggan', idPelanggan);
     };
 
-    // Handle Toggle Lunas
-    const handleToggleLunas = (id: number) => {
+    // Handle Toggle Lunas per Warga
+    const handleToggleLunas = async (idPelanggan: string) => {
+        let newStatus = false;
+        const updated = wargaList.map(item => {
+            if (item.idPelanggan === idPelanggan) {
+                newStatus = !item.isLunas;
+                return { ...item, isLunas: newStatus };
+            }
+            return item;
+        });
+        updateAndSaveData(updated);
+
+        // Update ke Supabase
+        await supabase
+            .from('pelanggan')
+            .update({ is_lunas: newStatus })
+            .eq('id_pelanggan', idPelanggan);
+    };
+
+    // Tandai Semua Lunas (sesuai filter aktif)
+    const handleTandaiSemuaLunas = async (status: boolean) => {
+        const targetIds = filteredData.map(w => w.idPelanggan);
         const updated = wargaList.map(item =>
-            item.id === id ? { ...item, isLunas: !item.isLunas } : item
+            targetIds.includes(item.idPelanggan) ? { ...item, isLunas: status } : item
         );
         updateAndSaveData(updated);
+
+        // Update batch ke Supabase
+        for (const idPel of targetIds) {
+            await supabase
+                .from('pelanggan')
+                .update({ is_lunas: status })
+                .eq('id_pelanggan', idPel);
+        }
     };
 
     // Reset Data Master
@@ -184,10 +242,12 @@ export default function KasirPage() {
         return matchRt && matchSearch;
     });
 
-    // Perhitungan Total
+    // Perhitungan Total & Statistik
     const totalPln = filteredData.reduce((sum, item) => sum + item.tagihanPln, 0);
     const totalAdmin = filteredData.reduce((sum, item) => sum + item.admin, 0);
     const totalKeseluruhan = totalPln + totalAdmin;
+    const countLunas = filteredData.filter(item => item.isLunas).length;
+    const countBelumLunas = filteredData.length - countLunas;
 
     const MIN_ROWS = 10;
     const emptyRowsCount = Math.max(0, MIN_ROWS - filteredData.length);
@@ -210,6 +270,8 @@ export default function KasirPage() {
             background: white !important;
             margin: 0;
             padding: 0;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
           }
           .no-print {
             display: none !important;
@@ -230,34 +292,43 @@ export default function KasirPage() {
           th,
           td {
             border: 1px solid black !important;
-            padding: 6px 8px !important;
+            padding: 5px 6px !important;
           }
           tr {
             page-break-inside: avoid;
           }
           .print-bg-gray {
             background-color: #f3f4f6 !important;
-            -webkit-print-color-adjust: exact;
           }
           .input-print-hide {
             border: none !important;
             background: transparent !important;
             padding: 0 !important;
           }
+          .print-box-checked {
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            font-weight: 900 !important;
+            font-size: 14px !important;
+            border: 1.5px solid black !important;
+            width: 16px !important;
+            height: 16px !important;
+            line-height: 1 !important;
+            border-radius: 2px !important;
+          }
+          .print-box-empty {
+            display: inline-block !important;
+            border: 1.5px solid black !important;
+            width: 16px !important;
+            height: 16px !important;
+            border-radius: 2px !important;
+          }
         }
 
         .material-symbols-outlined {
           vertical-align: middle;
           line-height: 1;
-        }
-
-        .print-checkbox {
-          width: 16px;
-          height: 16px;
-          border: 1.5px solid #1b1c1a;
-          display: inline-block;
-          vertical-align: middle;
-          border-radius: 2px;
         }
       `}</style>
 
@@ -271,43 +342,55 @@ export default function KasirPage() {
                                 href="/dashboard"
                                 className="hover:bg-[#012d1d]/5 transition-colors px-3 py-1.5 rounded-lg text-sm font-semibold text-[#012d1d] flex items-center gap-1 border border-[#012d1d]/20"
                             >
-                                ← Kembali
+                                ← Dashboard
                             </Link>
                             <div className="flex items-center gap-2">
                                 <span className="material-symbols-outlined text-[#012d1d] text-2xl">
-                                    account_balance
+                                    receipt_long
                                 </span>
                                 <h1 className="text-lg md:text-xl font-bold text-[#012d1d]">
-                                    SIGAP Listrik Balong
+                                    Lembar Rekap Kasir
                                 </h1>
                             </div>
                         </div>
 
                         {/* Controls */}
-                        <div className="flex items-center gap-3 flex-wrap">
-                            <input
-                                type="text"
-                                placeholder="Cari warga / ID..."
-                                value={searchQuery}
-                                onChange={(e) => setSearchQuery(e.target.value)}
-                                className="bg-white border border-[#717973] text-xs px-3 py-1.5 rounded-md focus:outline-none focus:ring-1 focus:ring-[#012d1d]"
-                            />
-
+                        <div className="flex items-center gap-2 flex-wrap">
                             <button
-                                onClick={handleResetData}
-                                title="Atur ulang data jika tidak sinkron"
-                                className="border border-amber-600 text-amber-700 hover:bg-amber-50 font-bold text-xs px-3 py-1.5 rounded flex items-center gap-1 transition-all cursor-pointer"
+                                onClick={fetchWargaData}
+                                disabled={isSyncingSupabase}
+                                title="Sinkronkan data status pembayaran terbaru dari database"
+                                className="bg-[#012d1d]/10 hover:bg-[#012d1d]/20 text-[#012d1d] font-bold text-xs px-3 py-1.5 rounded flex items-center gap-1 transition-all cursor-pointer disabled:opacity-50"
                             >
-                                <span className="material-symbols-outlined text-sm">refresh</span>
-                                Reset Data (86)
+                                <span className={`material-symbols-outlined text-sm ${isSyncingSupabase ? 'animate-spin' : ''}`}>
+                                    {isSyncingSupabase ? 'progress_activity' : 'cloud_sync'}
+                                </span>
+                                Sinkron Cloud
                             </button>
 
-                            <div className="flex items-center gap-2">
-                                <label className="text-xs font-bold text-[#414844] uppercase">Filter:</label>
+                            <button
+                                onClick={() => handleTandaiSemuaLunas(true)}
+                                title="Tandai semua warga di tabel ini sebagai LUNAS"
+                                className="border border-emerald-600 text-emerald-700 hover:bg-emerald-50 font-bold text-xs px-2.5 py-1.5 rounded flex items-center gap-1 transition-all cursor-pointer"
+                            >
+                                <span className="material-symbols-outlined text-sm">check_circle</span>
+                                Centang Semua
+                            </button>
+
+                            <button
+                                onClick={() => handleTandaiSemuaLunas(false)}
+                                title="Batalkan status lunas untuk semua warga di tabel ini"
+                                className="border border-zinc-400 text-zinc-600 hover:bg-zinc-100 font-bold text-xs px-2.5 py-1.5 rounded flex items-center gap-1 transition-all cursor-pointer"
+                            >
+                                <span className="material-symbols-outlined text-sm">cancel</span>
+                                Batal Semua
+                            </button>
+
+                            <div className="flex items-center gap-1">
                                 <select
                                     value={selectedRt}
                                     onChange={(e) => setSelectedRt(e.target.value)}
-                                    className="bg-white border border-[#717973] text-[#1b1c1a] text-xs font-semibold rounded-md pl-3 pr-8 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#012d1d] cursor-pointer"
+                                    className="bg-white border border-[#717973] text-[#1b1c1a] text-xs font-semibold rounded-md pl-2 pr-6 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#012d1d] cursor-pointer"
                                 >
                                     <option value="SEMUA">Semua RT ({wargaList.length})</option>
                                     <option value="RT 04">RT 04</option>
@@ -318,20 +401,49 @@ export default function KasirPage() {
 
                             <button
                                 onClick={() => window.print()}
-                                className="bg-[#012d1d] text-white font-bold text-xs px-4 py-2 flex items-center gap-2 rounded hover:opacity-90 active:scale-95 transition-all shadow-md cursor-pointer"
+                                className="bg-[#012d1d] text-white font-bold text-xs px-3.5 py-1.5 flex items-center gap-1.5 rounded hover:opacity-90 active:scale-95 transition-all shadow-md cursor-pointer"
                             >
                                 <span className="material-symbols-outlined text-sm">print</span>
-                                Cetak ({filteredData.length} Data)
+                                Cetak ({filteredData.length})
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Sub toolbar info */}
+                    <div className="w-full max-w-[1024px] mx-auto mt-2 pt-2 border-t border-zinc-100 flex items-center justify-between text-xs text-zinc-600 flex-wrap gap-2">
+                        <div className="flex items-center gap-3 font-medium">
+                            <span>Total: <b>{filteredData.length}</b> Warga</span>
+                            <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full font-bold">
+                                ✓ Lunas: {countLunas}
+                            </span>
+                            <span className="text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full font-bold">
+                                ⏳ Belum: {countBelumLunas}
+                            </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <input
+                                type="text"
+                                placeholder="Cari nama/ID..."
+                                value={searchQuery}
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                                className="bg-white border border-zinc-300 text-xs px-2.5 py-1 rounded focus:outline-none focus:ring-1 focus:ring-[#012d1d] w-44"
+                            />
+                            <button
+                                onClick={handleResetData}
+                                title="Reset data ke master awal"
+                                className="text-zinc-500 hover:text-zinc-800 text-[11px] underline cursor-pointer"
+                            >
+                                Reset Master
                             </button>
                         </div>
                     </div>
                 </header>
 
                 {/* Main Print Canvas */}
-                <main className="w-full max-w-[1024px] bg-white mx-auto shadow-[0px_4px_12px_rgba(27,67,50,0.08)] p-8 md:p-12 mt-16 mb-12 print:mt-0 print:mb-0 print:shadow-none print:p-0 relative flex-1">
+                <main className="w-full max-w-[1024px] bg-white mx-auto shadow-[0px_4px_12px_rgba(27,67,50,0.08)] p-8 md:p-12 mt-28 mb-12 print:mt-0 print:mb-0 print:shadow-none print:p-0 relative flex-1">
 
                     {/* Document Header */}
-                    <div className="flex justify-between items-start border-b-2 border-[#012d1d] print-border-b pb-6 mb-6">
+                    <div className="flex justify-between items-start border-b-2 border-[#012d1d] print-border-b pb-4 mb-5">
                         <div>
                             <h1 className="text-2xl font-bold text-[#012d1d] uppercase mb-1">
                                 Sistem Manajemen Listrik Desa Balong
@@ -339,9 +451,11 @@ export default function KasirPage() {
                             <h2 className="text-lg font-semibold text-[#1b1c1a]">
                                 Lembar Kontrol Pembayaran Kasir {selectedRt !== 'SEMUA' ? `— Wilayah ${selectedRt}` : '— Seluruh Wilayah'}
                             </h2>
-                            <p className="text-xs text-[#717973] mt-1">Total Data: {filteredData.length} Warga</p>
+                            <p className="text-xs text-[#717973] mt-1">
+                                Total: {filteredData.length} Warga | Terbayar: {countLunas} Lunas ({countBelumLunas} Belum Bayar)
+                            </p>
                         </div>
-                        <div className="text-right flex flex-col gap-2 border border-[#717973] p-3 rounded-lg print-border min-w-[220px]">
+                        <div className="text-right flex flex-col gap-1.5 border border-[#717973] p-3 rounded-lg print-border min-w-[220px]">
                             <div className="flex justify-between gap-4 items-center">
                                 <span className="text-xs font-bold text-[#414844] uppercase">
                                     Periode:
@@ -364,28 +478,28 @@ export default function KasirPage() {
                         <table className="w-full border-collapse border border-[#717973] print-border text-left">
                             <thead>
                                 <tr className="bg-[#eae8e4] border-b-2 border-[#012d1d] print-border-b print-bg-gray">
-                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] w-[40px] text-center">
+                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] w-[35px] text-center">
                                         No
                                     </th>
-                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] min-w-[180px]">
+                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] min-w-[170px]">
                                         Nama Warga (RT)
                                     </th>
-                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] min-w-[130px]">
+                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] min-w-[125px]">
                                         ID Pelanggan
                                     </th>
-                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] text-right w-[110px]">
+                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] text-right w-[105px]">
                                         PLN
                                     </th>
-                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] text-right w-[90px]">
+                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] text-right w-[85px]">
                                         Admin
                                     </th>
-                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] text-right w-[110px]">
+                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] text-right w-[105px]">
                                         Total
                                     </th>
-                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] text-center w-[70px]">
+                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] text-center w-[65px]">
                                         Lunas?
                                     </th>
-                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] text-center w-[110px]">
+                                    <th className="p-2 border border-[#717973] print-border font-bold text-xs uppercase text-[#1b1c1a] text-center w-[100px]">
                                         Paraf / Ket.
                                     </th>
                                 </tr>
@@ -394,14 +508,14 @@ export default function KasirPage() {
                                 {filteredData.map((item, index) => {
                                     const total = item.tagihanPln + item.admin;
                                     return (
-                                        <tr key={item.id} className="border-b border-[#717973] print-border-b bg-white hover:bg-[#012d1d]/5 transition-colors">
+                                        <tr key={item.idPelanggan || index} className="border-b border-[#717973] print-border-b bg-white hover:bg-[#012d1d]/5 transition-colors">
                                             <td className="p-2 border-r border-[#717973] print-border text-center font-mono text-xs">{index + 1}</td>
                                             <td className="p-2 border-r border-[#717973] print-border font-medium text-xs md:text-sm">
                                                 {item.nama} <span className="text-[10px] md:text-xs text-[#414844]">({item.rt})</span>
                                             </td>
                                             <td className="p-2 border-r border-[#717973] print-border font-mono text-xs text-[#414844]">{item.idPelanggan}</td>
 
-                                            {/* Input / Display Nominal PLN yang disamakan ukurannya */}
+                                            {/* Input / Display Nominal PLN */}
                                             <td className="p-1 border-r border-[#717973] print-border font-mono text-xs text-right">
                                                 <div className="flex items-center justify-end gap-1 px-1">
                                                     <span className="text-[#414844] text-xs select-none">Rp</span>
@@ -411,7 +525,7 @@ export default function KasirPage() {
                                                         placeholder="0"
                                                         onChange={(e) => {
                                                             const rawValue = e.target.value.replace(/\D/g, '');
-                                                            handleTagihanChange(item.id, Number(rawValue) || 0);
+                                                            handleTagihanChange(item.idPelanggan, Number(rawValue) || 0);
                                                         }}
                                                         className="w-full text-right p-0.5 bg-transparent border border-transparent focus:border-[#012d1d] focus:bg-white rounded outline-none input-print-hide font-mono text-xs"
                                                     />
@@ -425,25 +539,43 @@ export default function KasirPage() {
                                                 Rp {total.toLocaleString('id-ID')}
                                             </td>
 
-                                            {/* Checkbox Status Lunas */}
+                                            {/* Checkbox Status Lunas (Interaktif di Layar & Cetak Otomatis di Kertas) */}
                                             <td className="p-2 border-r border-[#717973] print-border text-center">
+                                                {/* Di Layar Browser */}
                                                 <input
                                                     type="checkbox"
                                                     checked={item.isLunas}
-                                                    onChange={() => handleToggleLunas(item.id)}
-                                                    className="cursor-pointer w-4 h-4 accent-[#012d1d]"
+                                                    onChange={() => handleToggleLunas(item.idPelanggan)}
+                                                    className="cursor-pointer w-4 h-4 accent-[#012d1d] no-print"
                                                 />
+                                                {/* Di Kertas Cetak */}
+                                                <div className="hidden print:block">
+                                                    {item.isLunas ? (
+                                                        <span className="print-box-checked">✓</span>
+                                                    ) : (
+                                                        <span className="print-box-empty"></span>
+                                                    )}
+                                                </div>
                                             </td>
 
-                                            <td className="p-2 border-r border-[#717973] print-border text-center text-xs font-semibold text-[#717973]">
-                                                {item.isLunas ? 'Lunas' : ''}
+                                            {/* Kolom Paraf / Keterangan Lunas */}
+                                            <td className="p-2 border-r border-[#717973] print-border text-center text-xs font-semibold">
+                                                {item.isLunas ? (
+                                                    <span className="text-emerald-700 font-bold print:text-black">
+                                                        LUNAS
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-zinc-400 print:text-transparent text-[10px]">
+                                                        Belum Bayar
+                                                    </span>
+                                                )}
                                             </td>
                                         </tr>
                                     );
                                 })}
 
                                 {emptyRows.map((_, idx) => (
-                                    <tr key={`empty-${idx}`} className="border-b border-[#717973] print-border-b bg-white h-10">
+                                    <tr key={`empty-${idx}`} className="border-b border-[#717973] print-border-b bg-white h-8">
                                         <td className="p-2 border-r border-[#717973] print-border text-center font-mono text-xs text-[#717973]">
                                             {filteredData.length + idx + 1}
                                         </td>
@@ -453,7 +585,7 @@ export default function KasirPage() {
                                         <td className="p-2 border-r border-[#717973] print-border"></td>
                                         <td className="p-2 border-r border-[#717973] print-border bg-[#f5f3ef]/50 print-bg-gray"></td>
                                         <td className="p-2 border-r border-[#717973] print-border text-center">
-                                            <div className="print-checkbox"></div>
+                                            <span className="print-box-empty hidden print:inline-block"></span>
                                         </td>
                                         <td className="p-2 border-r border-[#717973] print-border"></td>
                                     </tr>
@@ -474,23 +606,25 @@ export default function KasirPage() {
                                     <td className="p-2 border border-[#717973] print-border text-right font-mono text-[#012d1d]">
                                         Rp {totalKeseluruhan.toLocaleString('id-ID')}
                                     </td>
-                                    <td colSpan={2} className="p-2 border border-[#717973] print-border"></td>
+                                    <td colSpan={2} className="p-2 border border-[#717973] print-border text-center text-[10px]">
+                                        Terbayar: {countLunas}/{filteredData.length}
+                                    </td>
                                 </tr>
                             </tfoot>
                         </table>
                     </div>
 
                     {/* Signatures */}
-                    <div className="mt-12 pt-6 flex justify-between items-end pb-4 print:break-inside-avoid">
-                        <div className="text-center w-[220px]">
-                            <p className="text-sm text-[#1b1c1a] mb-20 font-medium">Ketua Karang Taruna</p>
+                    <div className="mt-8 pt-4 flex justify-between items-end pb-4 print:break-inside-avoid">
+                        <div className="text-center w-[200px]">
+                            <p className="text-xs text-[#1b1c1a] mb-16 font-medium">Ketua Karang Taruna</p>
                             <div className="border-b border-[#1b1c1a] print-border-b w-full"></div>
-                            <p className="text-xs text-[#414844] mt-2 font-semibold">( Dandi Pamungkas )</p>
+                            <p className="text-xs text-[#414844] mt-1 font-semibold">( Dandi Pamungkas )</p>
                         </div>
-                        <div className="text-center w-[220px]">
-                            <p className="text-sm text-[#1b1c1a] mb-20 font-medium">Petugas Piket / Kasir</p>
+                        <div className="text-center w-[200px]">
+                            <p className="text-xs text-[#1b1c1a] mb-16 font-medium">Petugas Piket / Kasir</p>
                             <div className="border-b border-[#1b1c1a] print-border-b w-full"></div>
-                            <p className="text-xs text-[#414844] mt-2 font-semibold">( Hilmy Alif Nurdzaki )</p>
+                            <p className="text-xs text-[#414844] mt-1 font-semibold">( Hilmy Alif Nurdzaki )</p>
                         </div>
                     </div>
                 </main>

@@ -3,9 +3,10 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabase';
 
 interface WargaMading {
-    id: number;
+    id: number | string;
     nama: string;
     rt: string;
     idPelanggan: string;
@@ -114,6 +115,7 @@ export default function LembarKontrolPage() {
     const [wargaList, setWargaList] = useState<WargaMading[]>(initialData);
     const [selectedRt, setSelectedRt] = useState<string>('SEMUA');
     const [petugasPiket, setPetugasPiket] = useState<string>('Hilmy Alif Nurdzaki');
+    const [isSyncing, setIsSyncing] = useState<boolean>(false);
 
     // 1. Proteksi Akses (Auth Guard)
     useEffect(() => {
@@ -123,21 +125,47 @@ export default function LembarKontrolPage() {
         }
     }, [router]);
 
-    // 2. Ambil & Sinkronkan Data dari LocalStorage
-    useEffect(() => {
-        const savedData = localStorage.getItem('sigap_warga_balong_data');
-        if (savedData) {
-            try {
-                const parsed = JSON.parse(savedData);
-                if (parsed && parsed.length > 0) {
-                    setWargaList(parsed);
+    // 2. Ambil & Sinkronkan Data dari Supabase (fallback ke LocalStorage)
+    const fetchMadingData = async () => {
+        setIsSyncing(true);
+        try {
+            const { data, error } = await supabase
+                .from('pelanggan')
+                .select('*')
+                .order('nama', { ascending: true });
+
+            if (!error && data && data.length > 0) {
+                const mapped: WargaMading[] = data.map((item: any, idx: number) => ({
+                    id: item.id || idx + 1,
+                    nama: item.nama || '',
+                    rt: item.rt || 'RT 04',
+                    idPelanggan: item.id_pelanggan || '',
+                    tagihanPln: Number(item.tagihan_pln) || 0,
+                    admin: Number(item.admin) || 6000,
+                    isLunas: Boolean(item.is_lunas),
+                }));
+                setWargaList(mapped);
+                localStorage.setItem('sigap_warga_balong_data', JSON.stringify(mapped));
+            } else {
+                const savedData = localStorage.getItem('sigap_warga_balong_data');
+                if (savedData) {
+                    try {
+                        const parsed = JSON.parse(savedData);
+                        if (parsed && parsed.length > 0) setWargaList(parsed);
+                    } catch (e) {
+                        setWargaList(initialData);
+                    }
                 }
-            } catch (e) {
-                setWargaList(initialData);
             }
-        } else {
-            localStorage.setItem('sigap_warga_balong_data', JSON.stringify(initialData));
+        } catch (err) {
+            console.error('Error fetching data for mading:', err);
+        } finally {
+            setIsSyncing(false);
         }
+    };
+
+    useEffect(() => {
+        fetchMadingData();
     }, []);
 
     const filteredData = selectedRt === 'SEMUA'
@@ -201,6 +229,18 @@ export default function LembarKontrolPage() {
                     </div>
 
                     <div className="flex items-center gap-3 flex-wrap">
+                        <button
+                            onClick={fetchMadingData}
+                            disabled={isSyncing}
+                            className="bg-[#012d1d]/10 hover:bg-[#012d1d]/20 text-[#012d1d] font-bold text-xs px-3 py-2 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                            title="Sinkronkan data status pembayaran terbaru dari database"
+                        >
+                            <span className={`material-symbols-outlined text-sm ${isSyncing ? 'animate-spin' : ''}`}>
+                                {isSyncing ? 'progress_activity' : 'cloud_sync'}
+                            </span>
+                            Sinkron Cloud
+                        </button>
+
                         <div className="flex items-center gap-2">
                             <label className="text-xs font-bold uppercase text-gray-600">Pilih RT :</label>
                             <select
@@ -219,6 +259,7 @@ export default function LembarKontrolPage() {
                             onClick={() => window.print()}
                             className="bg-[#012d1d] text-white px-5 py-2 rounded-lg font-semibold text-xs hover:opacity-90 transition-all shadow-sm flex items-center gap-2 cursor-pointer"
                         >
+                            <span className="material-symbols-outlined text-sm">print</span>
                             Cetak Lembar Tagihan
                         </button>
                     </div>
@@ -273,14 +314,14 @@ export default function LembarKontrolPage() {
                                 <th className="p-2 border border-gray-400 font-bold text-xs uppercase">Nama (RT)</th>
                                 <th className="p-2 border border-gray-400 font-bold text-xs uppercase min-w-[140px]">ID Pelanggan</th>
                                 <th className="p-2 border border-gray-400 text-right font-bold text-xs uppercase">Total Tagihan</th>
-                                <th className="p-2 border border-gray-400 text-center w-[90px] font-bold text-xs uppercase">Paraf</th>
+                                <th className="p-2 border border-gray-400 text-center w-[100px] font-bold text-xs uppercase">Keterangan / Paraf</th>
                             </tr>
                         </thead>
                         <tbody>
                             {filteredData.map((item, index) => {
-                                const total = getRoundedTotal(item); // Menggunakan total yang sudah dibulatkan
+                                const total = getRoundedTotal(item);
                                 return (
-                                    <tr key={item.id} className="border-b border-gray-300 hover:bg-gray-50">
+                                    <tr key={item.idPelanggan || item.id} className="border-b border-gray-300 hover:bg-gray-50">
                                         <td className="p-2 border-r border-gray-300 text-center font-mono text-xs">{index + 1}</td>
                                         <td className="p-2 border-r border-gray-300 font-semibold text-xs md:text-sm">
                                             {item.nama} <span className="text-gray-500 font-normal">({item.rt})</span>
@@ -289,8 +330,14 @@ export default function LembarKontrolPage() {
                                         <td className="p-2 border-r border-gray-300 font-mono text-xs text-right font-bold text-[#012d1d]">
                                             Rp {total.toLocaleString('id-ID')}
                                         </td>
-                                        <td className="p-2 border-r border-gray-300 text-center text-xs text-green-700 font-semibold">
-                                            {item.isLunas ? '✓ Lunas' : ''}
+                                        <td className="p-2 border-r border-gray-300 text-center text-xs">
+                                            {item.isLunas ? (
+                                                <span className="font-bold text-emerald-700 print:text-black">
+                                                    ✓ LUNAS
+                                                </span>
+                                            ) : (
+                                                <span className="text-gray-400 print:hidden text-[10px]">Belum Bayar</span>
+                                            )}
                                         </td>
                                     </tr>
                                 );

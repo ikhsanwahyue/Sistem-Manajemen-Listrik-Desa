@@ -1,0 +1,28 @@
+name: Keep Supabase Alive
+
+on:
+  schedule:
+    # Berjalan setiap hari Senin dan Kamis pukul 00:00 UTC (2x seminggu agar aman dari pause 7 hari)
+    - cron: '0 0 * * 1,4'
+  workflow_dispatch: # Memungkinkan tombol 'Run workflow' secara manual di tab Actions GitHub
+
+jobs:
+  ping-supabase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase Database via REST API
+        env:
+          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          echo "⚡ Mengirim query ringan ke Supabase agar database tidak ter-pause..."
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$SUPABASE_URL/rest/v1/pelanggan?select=id&limit=1" \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_KEY")
+          
+          echo "Status HTTP Response: $RESPONSE"
+          if [ "$RESPONSE" -eq 200 ] || [ "$RESPONSE" -eq 206 ]; then
+            echo "✅ Sukses! Supabase aktif dan berhasil merespons query."
+          else
+            echo "⚠️ Warning: Status HTTP $RESPONSE. Cek kembali URL dan Anon Key di GitHub Secrets."
+          fi
