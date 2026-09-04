@@ -172,15 +172,13 @@ export default function LembarKontrolPage() {
         ? wargaList
         : wargaList.filter(item => item.rt === selectedRt);
 
-    // Fungsi helper untuk menghitung total per warga dan membulatkannya ke ribuan terdekat
-    const getRoundedTotal = (item: any) => {
-        const rawTotal = item.tagihanPln + item.admin;
-        // Gunakan Math.round untuk pembulatan standar, atau Math.floor jika ingin selalu ke bawah
-        return Math.round(rawTotal / 1000) * 1000;
+    // Fungsi helper untuk menghitung total per warga (Tagihan Asli PLN + Admin Desa) secara presisi
+    const getTotalTagihan = (item: any) => {
+        return (Number(item.tagihanPln) || 0) + (Number(item.admin) || 0);
     };
 
-    // Akumulasi total keseluruhan berdasarkan nilai yang sudah dibulatkan
-    const totalKeseluruhan = filteredData.reduce((acc, curr) => acc + getRoundedTotal(curr), 0);
+    // Akumulasi total keseluruhan secara presisi tanpa pembulatan
+    const totalKeseluruhan = filteredData.reduce((acc, curr) => acc + getTotalTagihan(curr), 0);
 
     return (
         <>
@@ -319,7 +317,7 @@ export default function LembarKontrolPage() {
                         </thead>
                         <tbody>
                             {filteredData.map((item, index) => {
-                                const total = getRoundedTotal(item);
+                                const total = getTotalTagihan(item);
                                 return (
                                     <tr key={item.idPelanggan || item.id} className="border-b border-gray-300 hover:bg-gray-50">
                                         <td className="p-2 border-r border-gray-300 text-center font-mono text-xs">{index + 1}</td>

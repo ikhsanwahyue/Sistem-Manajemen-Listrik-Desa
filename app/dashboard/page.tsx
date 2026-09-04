@@ -33,7 +33,7 @@ export default function DashboardPage() {
     const [formTagihanPln, setFormTagihanPln] = useState('');
     const [formAdmin, setFormAdmin] = useState('6000');
 
-    // 1. Ambil data dari Supabase saat komponen dimuat
+    // 1. Ambil data dari Supabase saat komponen dimuat (dengan fallback ke localStorage)
     const fetchWargaFromSupabase = async () => {
         try {
             const { data, error } = await supabase
@@ -42,8 +42,15 @@ export default function DashboardPage() {
                 .order('nama', { ascending: true });
 
             if (error) {
-                console.error('Gagal mengambil data dari Supabase:', error.message);
-            } else if (data) {
+                console.warn('Gagal mengambil data dari Supabase, memuat dari LocalStorage:', error.message);
+                const saved = localStorage.getItem('sigap_warga_balong_data');
+                if (saved) {
+                    try {
+                        const parsed = JSON.parse(saved);
+                        if (parsed && parsed.length > 0) setWargaList(parsed);
+                    } catch (e) {}
+                }
+            } else if (data && data.length > 0) {
                 // Petakan data dari database ke format interface WargaData
                 const mappedData: WargaData[] = data.map((item: any, index: number) => ({
                     id: item.id || index + 1,
@@ -52,12 +59,20 @@ export default function DashboardPage() {
                     idPelanggan: item.id_pelanggan || '',
                     tagihanPln: Number(item.tagihan_pln) || 0,
                     admin: Number(item.admin) || 6000,
-                    isLunas: item.is_lunas || false,
+                    isLunas: Boolean(item.is_lunas),
                 }));
                 setWargaList(mappedData);
+                localStorage.setItem('sigap_warga_balong_data', JSON.stringify(mappedData));
             }
         } catch (err) {
             console.error('Terjadi kesalahan:', err);
+            const saved = localStorage.getItem('sigap_warga_balong_data');
+            if (saved) {
+                try {
+                    const parsed = JSON.parse(saved);
+                    if (parsed && parsed.length > 0) setWargaList(parsed);
+                } catch (e) {}
+            }
         } finally {
             setIsLoaded(true);
         }
@@ -124,9 +139,14 @@ export default function DashboardPage() {
                     )
                 );
 
+                const targetAdmin = data.adminDesa || 6000;
                 await supabase
                     .from('pelanggan')
-                    .update({ tagihan_pln: data.tagihanPln, is_lunas: false })
+                    .update({ 
+                        tagihan_pln: data.tagihanPln, 
+                        admin: targetAdmin, 
+                        is_lunas: false 
+                    })
                     .eq('id_pelanggan', idPelanggan);
 
                 alert(`📋 Info Tagihan (Belum Bayar):\nID: ${cleanId}\nNama: ${data.namaPelanggan}\nNominal Tagihan PLN: Rp ${data.tagihanPln.toLocaleString('id-ID')}\nAdmin Desa: Rp ${data.adminDesa.toLocaleString('id-ID')}\nTotal: Rp ${data.totalTagihan.toLocaleString('id-ID')}`);
@@ -190,7 +210,11 @@ export default function DashboardPage() {
                     updatedList[i].isLunas = false;
                     await supabase
                         .from('pelanggan')
-                        .update({ tagihan_pln: data.tagihanPln, is_lunas: false })
+                        .update({ 
+                            tagihan_pln: data.tagihanPln, 
+                            admin: data.adminDesa || updatedList[i].admin, 
+                            is_lunas: false 
+                        })
                         .eq('id_pelanggan', updatedList[i].idPelanggan);
                 } else if (data.status === 'LUNAS') {
                     updatedList[i].tagihanPln = 0;
