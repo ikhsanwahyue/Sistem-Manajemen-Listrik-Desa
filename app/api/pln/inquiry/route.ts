@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
-import puppeteer from 'puppeteer';
 
 interface InquiryRequest {
     idPelanggan: string;
@@ -123,6 +122,9 @@ async function inquiryScraper(cleanIdPel: string, adminDesa: number) {
     let browser = null;
     try {
         console.log(`🤖 [Scraper Engine] Memulai fallback inquiry untuk ID: ${cleanIdPel}`);
+
+        const puppeteerModule = await import('puppeteer');
+        const puppeteer = puppeteerModule.default || puppeteerModule;
 
         browser = await puppeteer.launch({
             headless: true,
